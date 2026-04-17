@@ -239,7 +239,8 @@ public class GraphQLDataProvider extends AbstractDataProvider {
                 throw new IllegalArgumentException("No collection info in request");
             }
 
-            // Extract requested fields from whatever request type the QE sends
+            // Extract requested fields from the QE's fieldMetadata (authoritative order)
+            // or fall back to request-type-specific extraction
             List<String> requestedFields = extractFieldsFromRequest(request);
 
             return new GraphQLComputeTaskFactory(
@@ -275,73 +276,47 @@ public class GraphQLDataProvider extends AbstractDataProvider {
     }
 
     /**
-     * Extract field names from any structured request type (raw, agg, stats, distinct).
-     * For RAW_DATA_ONLY connectors, the QE still sends aggDataRequest for GROUP BY queries.
-     * We need to return ALL data fields so the QE can aggregate locally.
-     * If we can identify specific fields, we return those; otherwise null triggers wildcard.
+     * Extract field names from the structured request.
+     *
+     * CRITICAL: The QE's fieldMetadata map is the authoritative source of which
+     * fields to return and in what order. For aggregation queries, the QE sends
+     * only the fields it needs (group-by + metric fields) in fieldMetadata.
+     * Returning all fields or fields in a different order causes
+     * NumberFormatException in the QE's RowConverter.
      */
     private List<String> extractFieldsFromRequest(DataReadRequest request) {
         if (request.getStructured() == null) return null;
 
         com.zoomdata.gen.edc.request.StructuredRequest sr = request.getStructured();
 
-        // Raw data request: fields are directly listed
+        // Log fieldMetadata for debugging but always return all fields.
+        // With RAW_DATA_ONLY=false, the QE handles aggregation via its normal path.
+        if (sr.getFieldMetadata() != null && !sr.getFieldMetadata().isEmpty()) {
+            log.info("fieldMetadata present ({} fields: {}), returning all fields",
+                    sr.getFieldMetadata().size(), sr.getFieldMetadata().keySet());
+        }
+
+        // FALLBACK: Raw data request with explicit field list
         if (sr.getRawDataRequest() != null
                 && sr.getRawDataRequest().getFields() != null
                 && !sr.getRawDataRequest().getFields().isEmpty()) {
-            log.info("Extracting fields from rawDataRequest: {}", sr.getRawDataRequest().getFields());
+            log.info("Using rawDataRequest fields: {}", sr.getRawDataRequest().getFields());
             return sr.getRawDataRequest().getFields();
         }
 
-        // Aggregation request: extract group fields + metric fields
-        if (sr.getAggDataRequest() != null) {
-            java.util.Set<String> fields = new java.util.LinkedHashSet<>();
-
-            // Group-by fields
-            if (sr.getAggDataRequest().getGroups() != null) {
-                for (com.zoomdata.gen.edc.group.Group g : sr.getAggDataRequest().getGroups()) {
-                    if (g.getAttributeGroup() != null) {
-                        fields.add(g.getAttributeGroup().getField());
-                    }
-                    if (g.getTimeGroup() != null) {
-                        fields.add(g.getTimeGroup().getField());
-                    }
-                }
-            }
-
-            // Metric fields (sum, avg, min, max, count)
-            if (sr.getAggDataRequest().getMetrics() != null) {
-                for (com.zoomdata.gen.edc.metric.Metric m : sr.getAggDataRequest().getMetrics()) {
-                    if (m.getSum() != null) fields.add(m.getSum().getField());
-                    if (m.getAvg() != null) fields.add(m.getAvg().getField());
-                    if (m.getMin() != null) fields.add(m.getMin().getField());
-                    if (m.getMax() != null) fields.add(m.getMax().getField());
-                }
-            }
-
-            // RAW_DATA_ONLY: always return ALL fields for aggregation queries.
-            // The QE aggregates locally and needs the full row.
-            log.info("aggDataRequest detected, returning all fields (RAW_DATA_ONLY mode)");
-            return null;
-        }
-
-        // Stats request: extract stat fields
+        // FALLBACK: Stats request
         if (sr.getStatsDataRequest() != null
                 && sr.getStatsDataRequest().getStatFields() != null) {
             List<String> fields = new ArrayList<>();
             for (com.zoomdata.gen.edc.request.StatField sf : sr.getStatsDataRequest().getStatFields()) {
                 fields.add(sf.getField());
             }
-            log.info("Extracting fields from statsDataRequest: {}", fields);
+            log.info("Using statsDataRequest fields: {}", fields);
             return fields;
         }
 
-        // Distinct values request
-        if (sr.getDistinctValuesRequest() != null) {
-            log.info("distinctValuesRequest detected, using wildcard");
-            return null;
-        }
-
+        // No explicit fields: return null (triggers wildcard via introspection)
+        log.info("No field list in request, using wildcard");
         return null;
     }
 

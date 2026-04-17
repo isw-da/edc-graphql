@@ -16,7 +16,7 @@ public class GraphQLFeatures implements IFeatures {
                     .put("REQUEST.TYPE", "STRUCTURED")
                     .put("FEATURE.LIVE_SOURCE", "true")
                     .put("FEATURE.REFRESHABLE", "true")
-                    .put("FEATURE.RAW_DATA_ONLY", "true")
+                    .put("FEATURE.RAW_DATA_ONLY", "false")
                     .put("FEATURE.SUPPORTS_SCHEMA", "true")
                     .put("FEATURE.OFFSET", "false")
                     .put("FEATURE.FAST_DISTINCT_VALUES", "false")
