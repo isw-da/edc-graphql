@@ -1,97 +1,175 @@
-# Copyright (C) Zoomdata, Inc. 2012-2017. All rights reserved.
+# GraphQL EDC Connector for Simba Intelligence
 
-Sample Connector Server for building a crate.io connector from the Zoomdata 2.x Connector API
+A custom Enterprise Data Connector (EDC) that connects any GraphQL API to
+[Simba Intelligence](https://insightsoftware.com/simba-intelligence/) and
+Logi Composer for natural language querying.
 
-## Prerequisites
+Built from the [Zoomdata EDC template](https://github.com/Zoomdata/edc-cratedb),
+upgraded to production-compatible stack (edc-api 25.4.0, Thrift 0.21.0,
+Spring Boot 3.2.5, Java 17).
 
-This project assumes working installations of:
+## What it does
 
-* JDK 1.8
-* Maven 3.x
-* Docker (only required for connector testing)
+- Connects to **any GraphQL API** via HTTP POST
+- Auto-discovers schema via GraphQL introspection
+- Supports both **flat array** and **Relay connection** patterns (edges/node)
+- Configurable authentication (Bearer, API key, custom headers)
+- Registers with Composer via Consul for seamless integration
+- Queries through SI Playground using natural language
 
-## <a name="starting"></a>Starting the Connector Server
+## Tested against
 
-To build the project:
+| API | Pattern | Status |
+|-----|---------|--------|
+| [Countries API](https://countries.trevorblades.com/graphql) | Flat array, no auth | Working |
+| Supabase FRC (fintech risk/compliance) | Relay, apikey header | Working |
+| Supabase Factory (manufacturing ops) | Relay, apikey header | Working |
 
-`mvn clean install`
+## Quick start
 
-To run the server:
+### Prerequisites
 
-`./start-server.sh`
+- Java 17
+- Maven 3.x
+- Docker (for containerised deployment)
+- A running Simba Intelligence instance ([setup guide](https://github.com/isw-da/simba-intelligence-skill))
 
-By default, the connector will serve connections over HTTP at http://localhost:7337/connector
+### Build
 
-## Connecting to Zoomdata
+```bash
+export JAVA_HOME=/path/to/jdk-17
+mvn clean package -Dlicense.skip=true -DskipTests
+```
 
-Refer to the [official Zoomdata docs](https://www.zoomdata.com/docs) for instructions to register a connector server.
+### Run locally
 
-Make sure to select `HTTP` as `Connector Server Type` and to add the `Server URL` in the following format:
+```bash
+java -Duser.timezone=UTC -jar target/connector-server-graphql-1.0.0-exec.jar
+```
 
-`http://127.0.0.1:7337/connector/`
+Server starts on port 7338 at `/connector/`.
 
-Once the connector server is created, the connection type will need to be manually added.
+### Deploy to Kubernetes
 
-Set the Storage Type to `CRATEDB`.
+```bash
+# Build and load Docker image
+docker build -t edc-graphql:latest .
+# For kind:
+kind load docker-image edc-graphql:latest --name <cluster>
+# For cloud: push to your container registry
 
-Add the following connection parameters:
+# Deploy pod and service
+kubectl apply -n <namespace> -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: edc-graphql
+  labels:
+    app: edc-graphql
+spec:
+  containers:
+  - name: edc-graphql
+    image: edc-graphql:latest
+    imagePullPolicy: Never
+    ports:
+    - containerPort: 7338
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edc-graphql
+spec:
+  selector:
+    app: edc-graphql
+  ports:
+  - port: 7338
+    targetPort: 7338
+EOF
+```
 
-    Parameter Name      Type       Required
+### Register in Composer
 
-    JDBC_URL            Text        Yes
-    USER_NAME           Text        No
-    PASSWORD            Password    No
+```bash
+# 1. Register in Consul
+kubectl -n <namespace> exec <release>-consul-server-0 -c consul -- \
+  consul services register \
+    -name=edc-graphql \
+    -address=edc-graphql.<namespace>.svc.cluster.local \
+    -port=7338
 
-There's also a [tutorial video](https://drive.google.com/open?id=0B5hqni4_xCGadGVMek40SDcyTVU) that can walk you through the process.
+# 2. Register in Composer
+curl -s -X POST "http://localhost:8080/discovery/api/connectors" \
+  -u "admin:<password>" \
+  -H "Content-Type: application/vnd.composer.v3+json" \
+  -d '{
+    "name": "GraphQL",
+    "type": "DISCOVERY",
+    "params": {
+      "SERVICE_NAME": "edc-graphql",
+      "BEHIND_GATEWAY": "false"
+    }
+  }'
+```
 
-## Testing the Connector
+### Create a connection
 
-_TODO: Link the Zoomdata connector testing guide when it's made publicly available_
+In the SI UI: **Connections > Create > GraphQL**
 
-This package also includes a simple crate.io container pre-loaded with the Zoomdata connector testing reference data. It uses [Docker](https://www.docker.com/) to run the container so no further installation is required.
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| GRAPHQL_URL | Yes | GraphQL endpoint URL |
+| AUTH_TOKEN | No | Authentication token |
+| AUTH_HEADER_NAME | No | Header name (default: Authorization) |
+| AUTH_HEADER_PREFIX | No | Token prefix (default: Bearer) |
+| CUSTOM_HEADERS | No | Additional headers as JSON, e.g. `{"apikey":"eyJ..."}` |
 
-First, build the container with:
+## Connection examples
 
-`docker build -t zoomdata/crate-test test-server`
+### Public API (no auth)
+- **URL:** `https://countries.trevorblades.com/graphql`
+- Leave all auth fields empty
 
-Run the container exposing the default ports. The ports can be adjusted if needed:
+### Supabase GraphQL
+- **URL:** `https://<project-ref>.supabase.co/graphql/v1`
+- **CUSTOM_HEADERS:** `{"apikey":"<your-supabase-anon-key>"}`
 
-`docker run -it --rm -p 4200:4200 -p 4300:4300 -p 5432:5432 zoomdata/crate-test`
+## Test suites
 
-Assuming the default ports were used, you should now be able to see the two testing tables in the `integration_tests` schema via the web admin UI:
+```bash
+# Infrastructure + API tests (66 tests)
+bash test-suite.sh
 
-http://localhost:4200/_plugin/crate-admin/#/tables
+# Comprehensive NLQ query tests (58 queries)
+bash test-nlq-severe.sh
 
-It may take a moment for the data to replicate and show as available.
+# Infrastructure + schema + security tests (66 tests)
+bash test-suite-v2.sh
+```
 
-Next, start up the EDC server under the `crate` user. This will have the crate user execute commands against the docker crate server:
+## Architecture
 
-1. `su - crate`
-2. Enter the crate user's password
-3. Execute `./start-server.sh`
+```
+Composer QE  -->  Thrift RPC  -->  GraphQL EDC  -->  HTTP POST  -->  GraphQL API
+                  /connector/      (this repo)       with auth       (any endpoint)
+```
 
-With our sample data source ready, [start the connector server](#starting) and launch `connector-shell` as provided by the Zoomdata testing guide.
+The connector implements `ConnectorService.Iface` (Thrift) and translates
+EDC requests into GraphQL queries. Schema discovery uses GraphQL
+introspection. Relay connection patterns (edges/node) are auto-detected
+and handled transparently.
 
-In connector shell, create a data source (assuming default ports):
+## Related
 
-`datasource add -n cratedb CONNECTOR_TYPE CRATEDB JDBC_URL crate://localhost:5432/`
+- **[SI Setup Skill](https://github.com/isw-da/simba-intelligence-skill)** —
+  Install, configure, and troubleshoot Simba Intelligence. Includes a
+  comprehensive guide for building custom EDC connectors at
+  `references/custom-edc-build.md`.
 
-Run the structured query test suite to validate structured request and query functionality:
+## Known limitations
 
-`test -ds cratedb -u structured -s integration_tests -c connector_test`
-
-Run the meta test suite to validate server description and meta functionality:
-
-`test -ds cratedb -u meta -s integration_tests -c meta_test`
-
-## Limitations
-
-The connector uses the CrateDB JDBC driver 2.x, which means that it is compatible with CrateDB >= 0.57.0. The driver does not use the CrateDB transport port to connect to a CrateDB server any longer and the connection string format has changed since the driver version 1.x.
-
-Please see the [CrateDB JDBC documentation](https://crate.io/docs/reference/jdbc/en/2.1.6/#jdbc-driver-class) for further reference.
-
-## Additional Notes
-
-Although this implementation uses Java and some freely available libraries for convenience, they are not a *requirement* for building a connector server.
-
-Any language capable of generating code from [Apache Thrift](https://thrift.apache.org/) can be used.
+- **Supabase pagination:** Default 30 rows per page. Large tables return
+  partial data without explicit `first: N` arguments.
+- **DATE fields:** Mapped as STRING to avoid QE min/max statistics
+  requirement. Time-series queries not supported.
+- **No pushdown filtering:** All data fetched then filtered by the QE.
+  Fine for small datasets, may be slow for large ones.
