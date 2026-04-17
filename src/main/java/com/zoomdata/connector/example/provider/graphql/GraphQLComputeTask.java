@@ -340,13 +340,59 @@ public class GraphQLComputeTask implements IComputeTask {
                 }
                 log.debug("Skipping NOT filter (only NOT(IS_NULL) is pushdown-supported): {}", filter);
                 return null;
+            case CONTAINS:
+                if (filter.getFilterCONTAINS() != null) {
+                    return wildcardClause(
+                            filter.getFilterCONTAINS().getPath(),
+                            filter.getFilterCONTAINS().getValue().getValue(),
+                            filter.getFilterCONTAINS().getMode(),
+                            "%", "%");
+                }
+                break;
+            case STARTS_WITH:
+                if (filter.getFilterSTARTS_WITH() != null) {
+                    return wildcardClause(
+                            filter.getFilterSTARTS_WITH().getPath(),
+                            filter.getFilterSTARTS_WITH().getValue().getValue(),
+                            filter.getFilterSTARTS_WITH().getMode(),
+                            "", "%");
+                }
+                break;
+            case ENDS_WITH:
+                if (filter.getFilterENDS_WITH() != null) {
+                    return wildcardClause(
+                            filter.getFilterENDS_WITH().getPath(),
+                            filter.getFilterENDS_WITH().getValue().getValue(),
+                            filter.getFilterENDS_WITH().getMode(),
+                            "%", "");
+                }
+                break;
             default:
-                // CONTAINS, STARTS_WITH, ENDS_WITH, TEXT_SEARCH, OR, EQI
-                // not supported for Supabase pushdown; QE handles locally
+                // TEXT_SEARCH, OR, EQI not supported for Supabase pushdown
                 log.debug("Skipping unsupported filter type for pushdown: {}", filter.getType());
                 return null;
         }
         return null;
+    }
+
+    /**
+     * Build a wildcard clause for CONTAINS / STARTS_WITH / ENDS_WITH using
+     * Supabase's like / ilike operators. CASE_INSENSITIVE and the
+     * datasource-default mode use ilike; CASE_SENSITIVE uses like.
+     */
+    private String wildcardClause(String path, String value,
+                                  com.zoomdata.gen.edc.filter.CaseSensitivityMode mode,
+                                  String prefix, String suffix) {
+        if (value == null) return null;
+        String op = (mode == com.zoomdata.gen.edc.filter.CaseSensitivityMode.CASE_SENSITIVE)
+                ? "like" : "ilike";
+        String pattern = prefix + escapeWildcards(value) + suffix;
+        return path + ": {" + op + ": \"" + escapeGraphQLString(pattern) + "\"}";
+    }
+
+    private String escapeWildcards(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     /**
