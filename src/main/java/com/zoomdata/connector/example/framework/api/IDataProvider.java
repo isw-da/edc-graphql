@@ -50,6 +50,12 @@ public interface IDataProvider {
         throw new RuntimeException("Sample is not supported");
     }
 
+    default MetaDescribeSchemaResponse describeSchemas(MetaDescribeSchemaRequest request) {
+        return new MetaDescribeSchemaResponse(
+                java.util.Collections.emptyList(),
+                new ResponseInfo(ResponseStatus.SUCCESS, "OK"));
+    }
+
     /* Data Requests */
 
     PrepareResponse prepare(DataReadRequest request) throws ExecuteException;

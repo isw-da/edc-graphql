@@ -8,6 +8,7 @@ import com.zoomdata.connector.example.framework.api.AbstractDataProvider;
 import com.zoomdata.connector.example.framework.api.IDescriptionProvider;
 import com.zoomdata.connector.example.framework.async.IComputeTaskFactory;
 import com.zoomdata.connector.example.framework.provider.serverdescription.GenericDescriptionProvider;
+import com.zoomdata.gen.edc.filter.Filter;
 import com.zoomdata.gen.edc.request.CollectionInfo;
 import com.zoomdata.gen.edc.request.DataReadRequest;
 import com.zoomdata.gen.edc.request.ExecuteCommandRequest;
@@ -16,6 +17,8 @@ import com.zoomdata.gen.edc.request.ExecuteException;
 import com.zoomdata.gen.edc.request.MetaCollectionsResponse;
 import com.zoomdata.gen.edc.request.MetaDescribeRequest;
 import com.zoomdata.gen.edc.request.MetaDescribeResponse;
+import com.zoomdata.gen.edc.request.MetaDescribeSchemaRequest;
+import com.zoomdata.gen.edc.request.MetaDescribeSchemaResponse;
 import com.zoomdata.gen.edc.request.MetaSchemasRequest;
 import com.zoomdata.gen.edc.request.MetaSchemasResponse;
 import com.zoomdata.gen.edc.request.MetaCollectionsRequest;
@@ -24,6 +27,7 @@ import com.zoomdata.gen.edc.request.ResponseInfo;
 import com.zoomdata.gen.edc.request.ResponseStatus;
 import com.zoomdata.gen.edc.request.SampleRequest;
 import com.zoomdata.gen.edc.request.SampleResponse;
+import com.zoomdata.gen.edc.request.Schema;
 import com.zoomdata.gen.edc.request.ServerInfoRequest;
 import com.zoomdata.gen.edc.request.ServerInfoResponse;
 import com.zoomdata.gen.edc.request.ValidateCollectionRequest;
@@ -176,6 +180,61 @@ public class GraphQLDataProvider extends AbstractDataProvider {
     }
 
     @Override
+    public MetaDescribeSchemaResponse describeSchemas(MetaDescribeSchemaRequest request) {
+        try {
+            String url = extractParam(request.getRequestInfo(), PARAM_URL);
+            Map<String, String> headers = extractHeaders(request.getRequestInfo());
+
+            GraphQLIntrospector introspector = new GraphQLIntrospector(httpClient, typesMapping);
+
+            // Get all collections (or filter to requested ones)
+            List<CollectionInfo> allCollections = introspector.getCollections(url, headers);
+
+            // If the request specifies particular collections, filter to those
+            List<CollectionInfo> requestedCollections = request.getCollections();
+            if (requestedCollections != null && !requestedCollections.isEmpty()) {
+                List<String> requestedNames = requestedCollections.stream()
+                        .map(CollectionInfo::getCollection)
+                        .collect(Collectors.toList());
+                allCollections = allCollections.stream()
+                        .filter(c -> requestedNames.contains(c.getCollection()))
+                        .collect(Collectors.toList());
+            }
+
+            // Build CollectionInfo with field metadata for each collection
+            List<CollectionInfo> collectionsWithFields = new ArrayList<>();
+            for (CollectionInfo ci : allCollections) {
+                try {
+                    List<FieldMetadata> fields = introspector.describeCollection(
+                            url, headers, ci.getCollection());
+                    CollectionInfo enriched = new CollectionInfo();
+                    enriched.setCollection(ci.getCollection());
+                    enriched.setSchema("default");
+                    enriched.setFields(fields);
+                    collectionsWithFields.add(enriched);
+                } catch (Exception e) {
+                    log.warn("Failed to describe collection '{}': {}",
+                            ci.getCollection(), e.getMessage());
+                }
+            }
+
+            // Build Schema with name="default", no relations
+            Schema schema = new Schema("default");
+            schema.setCollections(collectionsWithFields);
+
+            List<Schema> schemas = Collections.singletonList(schema);
+            log.info("describeSchemas returning {} schemas with {} collections",
+                    schemas.size(), collectionsWithFields.size());
+
+            return new MetaDescribeSchemaResponse(schemas, ok());
+        } catch (Exception e) {
+            log.error("describeSchemas failed: {}", e.getMessage());
+            return new MetaDescribeSchemaResponse(
+                    Collections.emptyList(), serverError(e.getMessage()));
+        }
+    }
+
+    @Override
     public SampleResponse sample(SampleRequest request) {
         try {
             String url = extractParam(request.getRequestInfo(), PARAM_URL);
@@ -243,9 +302,21 @@ public class GraphQLDataProvider extends AbstractDataProvider {
             // or fall back to request-type-specific extraction
             List<String> requestedFields = extractFieldsFromRequest(request);
 
+            // Extract filters from the structured request for pushdown
+            List<Filter> filters = null;
+            if (request.getStructured() != null) {
+                if (request.getStructured().getRawDataRequest() != null
+                        && request.getStructured().getRawDataRequest().getFilters() != null) {
+                    filters = request.getStructured().getRawDataRequest().getFilters();
+                } else if (request.getStructured().getAggDataRequest() != null
+                        && request.getStructured().getAggDataRequest().getFilters() != null) {
+                    filters = request.getStructured().getAggDataRequest().getFilters();
+                }
+            }
+
             return new GraphQLComputeTaskFactory(
                     httpClient, url, headers, collectionName,
-                    requestedFields, typesMapping, fetchSize);
+                    requestedFields, typesMapping, fetchSize, filters);
 
         } catch (Exception e) {
             throw new ExecuteException("Failed to create compute task: " + e.getMessage());

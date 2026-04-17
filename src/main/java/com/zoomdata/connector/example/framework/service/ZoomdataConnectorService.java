@@ -217,9 +217,17 @@ public class ZoomdataConnectorService implements ConnectorService.Iface {
     @Override
     public MetaDescribeSchemaResponse describeSchemas(MetaDescribeSchemaRequest request) throws TException {
         logMessage(request::toString, () -> "Processing MetaDescribeSchemaRequest");
-        return new MetaDescribeSchemaResponse(
-                Collections.emptyList(),
-                new ResponseInfo(ResponseStatus.SUCCESS, "OK"));
+        try {
+            MetaDescribeSchemaResponse response = provider(request.getRequestInfo()).describeSchemas(request);
+            logMessage(response::toString,
+                () -> String.format("Received MetaDescribeSchemaResponse: %d schemas", response.getSchemasSize()));
+            return response;
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+            return new MetaDescribeSchemaResponse(
+                    Collections.emptyList(),
+                    serverError(e.getMessage()));
+        }
     }
 
     @Override

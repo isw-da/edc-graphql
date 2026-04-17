@@ -9,6 +9,8 @@ import com.google.gson.JsonObject;
 import com.zoomdata.connector.example.framework.async.Cursor;
 import com.zoomdata.connector.example.framework.async.IComputeTask;
 import com.zoomdata.connector.example.framework.common.Meta;
+import com.zoomdata.gen.edc.filter.Filter;
+import com.zoomdata.gen.edc.filter.FilterFunction;
 import com.zoomdata.gen.edc.types.Field;
 import com.zoomdata.gen.edc.types.FieldType;
 import com.zoomdata.gen.edc.types.Record;
@@ -23,6 +25,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.stream.Collectors;
 
 public class GraphQLComputeTask implements IComputeTask {
 
@@ -35,6 +38,7 @@ public class GraphQLComputeTask implements IComputeTask {
     private final List<String> requestedFields;
     private final GraphQLTypesMapping typesMapping;
     private final int fetchSize;
+    private final List<Filter> filters;
 
     private volatile boolean cancelled = false;
     private volatile double progress = 0.0;
@@ -46,6 +50,13 @@ public class GraphQLComputeTask implements IComputeTask {
     public GraphQLComputeTask(GraphQLHttpClient httpClient, String url, Map<String, String> headers,
                                String collectionName, List<String> requestedFields,
                                GraphQLTypesMapping typesMapping, int fetchSize) {
+        this(httpClient, url, headers, collectionName, requestedFields, typesMapping, fetchSize, null);
+    }
+
+    public GraphQLComputeTask(GraphQLHttpClient httpClient, String url, Map<String, String> headers,
+                               String collectionName, List<String> requestedFields,
+                               GraphQLTypesMapping typesMapping, int fetchSize,
+                               List<Filter> filters) {
         this.httpClient = httpClient;
         this.url = url;
         this.headers = headers;
@@ -53,6 +64,7 @@ public class GraphQLComputeTask implements IComputeTask {
         this.requestedFields = requestedFields;
         this.typesMapping = typesMapping;
         this.fetchSize = fetchSize;
+        this.filters = filters;
     }
 
     @Override
@@ -188,6 +200,13 @@ public class GraphQLComputeTask implements IComputeTask {
         // Save the resolved field order for use in jsonToRecord and buildMetadata
         this.resolvedFieldOrder = new ArrayList<>(fields);
 
+        // Build filter argument (Supabase GraphQL filter syntax)
+        String filterArg = buildFilterArgument();
+        if (filterArg != null && !filterArg.isEmpty()) {
+            sb.append("(filter: {").append(filterArg).append("})");
+            log.info("Applied pushdown filter for '{}': {}", collectionName, filterArg);
+        }
+
         // Build field selection string
         StringBuilder fieldList = new StringBuilder();
         for (int i = 0; i < fields.size(); i++) {
@@ -207,6 +226,149 @@ public class GraphQLComputeTask implements IComputeTask {
 
         sb.append(" }");
         return sb.toString();
+    }
+
+    /**
+     * Build a Supabase-style GraphQL filter argument from EDC filters.
+     * Multiple filters are ANDed by placing them as sibling fields in the filter object.
+     * Returns null if no supported filters are present.
+     */
+    private String buildFilterArgument() {
+        if (filters == null || filters.isEmpty()) return null;
+
+        // Flatten AND filters and collect individual filter clauses
+        List<Filter> flatFilters = flattenFilters(filters);
+        List<String> clauses = new ArrayList<>();
+
+        for (Filter filter : flatFilters) {
+            String clause = convertFilter(filter);
+            if (clause != null) {
+                clauses.add(clause);
+            }
+        }
+
+        if (clauses.isEmpty()) return null;
+        return String.join(", ", clauses);
+    }
+
+    /**
+     * Flatten a list of filters, expanding AND composites into individual filters.
+     */
+    private List<Filter> flattenFilters(List<Filter> filterList) {
+        List<Filter> flat = new ArrayList<>();
+        for (Filter f : filterList) {
+            if (f.getType() == FilterFunction.AND && f.getFilterAND() != null
+                    && f.getFilterAND().getFilters() != null) {
+                flat.addAll(flattenFilters(f.getFilterAND().getFilters()));
+            } else {
+                flat.add(f);
+            }
+        }
+        return flat;
+    }
+
+    /**
+     * Convert a single EDC filter to a Supabase GraphQL filter clause.
+     * Returns null for unsupported filter types (QE handles those locally).
+     */
+    private String convertFilter(Filter filter) {
+        if (filter == null || filter.getType() == null) return null;
+
+        switch (filter.getType()) {
+            case EQ:
+                if (filter.getFilterEQ() != null) {
+                    String path = filter.getFilterEQ().getPath();
+                    String value = filter.getFilterEQ().getValue().getValue();
+                    FieldType type = filter.getFilterEQ().getType();
+                    return path + ": {eq: " + formatValue(value, type) + "}";
+                }
+                break;
+            case GT:
+                if (filter.getFilterGT() != null) {
+                    String path = filter.getFilterGT().getPath();
+                    String value = filter.getFilterGT().getValue().getValue();
+                    FieldType type = filter.getFilterGT().getType();
+                    return path + ": {gt: " + formatValue(value, type) + "}";
+                }
+                break;
+            case GE:
+                if (filter.getFilterGE() != null) {
+                    String path = filter.getFilterGE().getPath();
+                    String value = filter.getFilterGE().getValue().getValue();
+                    FieldType type = filter.getFilterGE().getType();
+                    return path + ": {gte: " + formatValue(value, type) + "}";
+                }
+                break;
+            case LT:
+                if (filter.getFilterLT() != null) {
+                    String path = filter.getFilterLT().getPath();
+                    String value = filter.getFilterLT().getValue().getValue();
+                    FieldType type = filter.getFilterLT().getType();
+                    return path + ": {lt: " + formatValue(value, type) + "}";
+                }
+                break;
+            case LE:
+                if (filter.getFilterLE() != null) {
+                    String path = filter.getFilterLE().getPath();
+                    String value = filter.getFilterLE().getValue().getValue();
+                    FieldType type = filter.getFilterLE().getType();
+                    return path + ": {lte: " + formatValue(value, type) + "}";
+                }
+                break;
+            case IN:
+                if (filter.getFilterIN() != null) {
+                    String path = filter.getFilterIN().getPath();
+                    FieldType type = filter.getFilterIN().getType();
+                    List<String> values = filter.getFilterIN().getValues().stream()
+                            .map(f -> formatValue(f.getValue(), type))
+                            .collect(Collectors.toList());
+                    return path + ": {in: [" + String.join(", ", values) + "]}";
+                }
+                break;
+            case IS_NULL:
+                if (filter.getFilterISNULL() != null) {
+                    String path = filter.getFilterISNULL().getPath();
+                    return path + ": {is: NULL}";
+                }
+                break;
+            case NOT:
+                if (filter.getFilterNOT() != null && filter.getFilterNOT().getFilter() != null) {
+                    Filter inner = filter.getFilterNOT().getFilter();
+                    if (inner.getType() == FilterFunction.IS_NULL && inner.getFilterISNULL() != null) {
+                        return inner.getFilterISNULL().getPath() + ": {is: NOT_NULL}";
+                    }
+                }
+                log.debug("Skipping NOT filter (only NOT(IS_NULL) is pushdown-supported): {}", filter);
+                return null;
+            default:
+                // CONTAINS, STARTS_WITH, ENDS_WITH, TEXT_SEARCH, OR, EQI
+                // not supported for Supabase pushdown; QE handles locally
+                log.debug("Skipping unsupported filter type for pushdown: {}", filter.getType());
+                return null;
+        }
+        return null;
+    }
+
+    /**
+     * Format a filter value for the GraphQL query.
+     * Strings are quoted, numbers are not.
+     */
+    private String formatValue(String value, FieldType type) {
+        if (type == null) {
+            return "\"" + escapeGraphQLString(value) + "\"";
+        }
+        switch (type) {
+            case INTEGER:
+            case DOUBLE:
+                return value;
+            default:
+                return "\"" + escapeGraphQLString(value) + "\"";
+        }
+    }
+
+    private String escapeGraphQLString(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private Record jsonToRecord(JsonObject json) {
