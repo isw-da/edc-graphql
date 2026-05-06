@@ -218,9 +218,21 @@ public class GraphQLDataProvider extends AbstractDataProvider {
                 }
             }
 
-            // Build Schema with name="default", no relations
+            // Build Schema with name="default" and derive relations from GraphQL
             Schema schema = new Schema("default");
             schema.setCollections(collectionsWithFields);
+
+            try {
+                List<String> collectionNames = collectionsWithFields.stream()
+                        .map(CollectionInfo::getCollection)
+                        .collect(Collectors.toList());
+                List<List<com.zoomdata.gen.edc.request.RelationMetadata>> relations =
+                        introspector.describeRelationships(url, headers, collectionNames);
+                schema.setRelations(relations);
+                log.info("describeSchemas derived {} relations", relations.size());
+            } catch (Exception e) {
+                log.warn("Relation discovery failed (continuing without relations): {}", e.getMessage());
+            }
 
             List<Schema> schemas = Collections.singletonList(schema);
             log.info("describeSchemas returning {} schemas with {} collections",

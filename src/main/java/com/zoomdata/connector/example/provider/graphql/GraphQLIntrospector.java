@@ -8,6 +8,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.zoomdata.connector.example.framework.common.Meta;
 import com.zoomdata.gen.edc.request.CollectionInfo;
+import com.zoomdata.gen.edc.request.RelationMetadata;
 import com.zoomdata.gen.edc.types.FieldMetadata;
 import com.zoomdata.gen.edc.types.FieldParams;
 import com.zoomdata.gen.edc.types.FieldType;
@@ -155,13 +156,92 @@ public class GraphQLIntrospector {
             FieldMetadata fm = new FieldMetadata();
             fm.setName(fieldName);
             fm.setType(meta.getThriftType());
-            fm.setFieldParams(new FieldParams());
+            FieldParams params = new FieldParams();
+            params.setFieldName(fieldName);
+            if (field.has("description") && !field.get("description").isJsonNull()) {
+                String desc = field.get("description").getAsString();
+                if (!desc.isEmpty()) {
+                    params.setFieldLabel(desc);
+                }
+            }
+            fm.setFieldParams(params);
 
             metadata.add(fm);
             log.debug("Field: {} -> type: {} (scalar: {})", fieldName, meta.getThriftType(), scalarType);
         }
 
         return metadata;
+    }
+
+    /**
+     * Derive foreign-key relationships from Relay-style GraphQL object fields.
+     *
+     * Walks each collection's node type, looking for fields of kind OBJECT whose
+     * target type is another known collection's node type (N-1 forward
+     * references). Reverse (xxxConnection) fields are skipped; the forward
+     * direction on the owning type carries the FK column.
+     *
+     * Supabase pg_graphql convention: a forward field `equipment.site` of
+     * target type `site` implies `equipment.site_id -> site.id`.
+     */
+    public List<List<RelationMetadata>> describeRelationships(String url,
+                                                                Map<String, String> headers,
+                                                                List<String> collectionNames) throws IOException {
+        JsonObject schema = fetchSchema(url, headers);
+
+        // Build a map: node type name -> collection name (e.g. site -> siteCollection)
+        java.util.Map<String, String> nodeTypeToCollection = new java.util.HashMap<>();
+        JsonArray queryFields = schema.getAsJsonObject("queryType").getAsJsonArray("fields");
+        for (JsonElement cfe : queryFields) {
+            JsonObject cf = cfe.getAsJsonObject();
+            String collName = cf.get("name").getAsString();
+            if (!collectionNames.contains(collName)) continue;
+            JsonObject ret = unwrapType(cf.getAsJsonObject("type"));
+            String retName = getTypeName(ret);
+            String nodeName = retName.endsWith("Connection")
+                    ? retName.substring(0, retName.length() - "Connection".length())
+                    : retName;
+            nodeTypeToCollection.put(nodeName, collName);
+        }
+
+        List<List<RelationMetadata>> relations = new ArrayList<>();
+        JsonArray types = schema.getAsJsonArray("types");
+        for (JsonElement te : types) {
+            JsonObject type = te.getAsJsonObject();
+            String typeName = type.has("name") && !type.get("name").isJsonNull()
+                    ? type.get("name").getAsString() : null;
+            if (typeName == null || !nodeTypeToCollection.containsKey(typeName)) continue;
+            if (!type.has("fields") || type.get("fields").isJsonNull()) continue;
+
+            String sourceCollection = nodeTypeToCollection.get(typeName);
+            for (JsonElement fe : type.getAsJsonArray("fields")) {
+                JsonObject field = fe.getAsJsonObject();
+                JsonObject ft = field.getAsJsonObject("type");
+                JsonObject unwrapped = unwrapType(ft);
+                String fKind = unwrapped != null && unwrapped.has("kind")
+                        ? unwrapped.get("kind").getAsString() : "";
+                if (!"OBJECT".equals(fKind)) continue;
+                String targetName = getTypeName(unwrapped);
+                // Skip reverse Connection references; forward side owns the FK
+                if (targetName.endsWith("Connection")) continue;
+                if (!nodeTypeToCollection.containsKey(targetName)) continue;
+
+                String targetCollection = nodeTypeToCollection.get(targetName);
+                String fieldName = field.get("name").getAsString();
+
+                RelationMetadata rel = new RelationMetadata();
+                rel.setPkSchema("default");
+                rel.setPkTable(targetCollection);
+                rel.setPkColumn("id");
+                rel.setFkSchema("default");
+                rel.setFkTable(sourceCollection);
+                rel.setFkColumn(fieldName + "_id");
+                relations.add(java.util.Collections.singletonList(rel));
+                log.debug("Relation: {}.{} -> {}.id (via {}.{}_id)",
+                        sourceCollection, fieldName + "_id", targetCollection, sourceCollection, fieldName);
+            }
+        }
+        return relations;
     }
 
     /**
