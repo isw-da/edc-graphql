@@ -160,10 +160,17 @@ and handled transparently.
 
 ## Related
 
+Other Logi Symphony / Simba Intelligence developer toolkit components in
+the same org:
+
 - **[SI Setup Skill](https://github.com/isw-da/simba-intelligence-skill)** —
   Install, configure, and troubleshoot Simba Intelligence. Includes a
   comprehensive guide for building custom EDC connectors at
   `references/custom-edc-build.md`.
+- **[Symphony Dashboard Builder Skill](https://github.com/isw-da/symphony-dashboard-builder-skill)** —
+  Claude skill for building Composer dashboards programmatically.
+- **[composer-mcp](https://github.com/isw-da/composer-mcp)** — MCP server
+  wrapping the Composer REST API as 30 tools.
 
 ## Known limitations
 
